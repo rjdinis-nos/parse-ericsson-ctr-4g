@@ -41,6 +41,7 @@ typedef struct RecordLenType
 typedef struct CTRHeader
 {
     uint16_t length;
+    uint8_t file_name[256];
     uint8_t file_version[6];       //  5 bytes + termination char
     uint8_t pm_version[14];        // 13 bytes + termination char
     uint8_t pm_revision[6];        //  5 bytes + termination char
@@ -738,7 +739,7 @@ void scan_bytes_from_buf(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos, u
 
 void scan_date_time(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
-    snprintf((char *)&target_var, 20,
+    snprintf((char *)target_var, 20,
              "%04d-%02d-%02d %02d:%02d:%02d",
              be16_to_cpu(buf + *buf_pos),
              (uint8_t)buf[*buf_pos + 2],
@@ -751,7 +752,7 @@ void scan_date_time(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 
 void scan_timestamp(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
-    snprintf((char *)&target_var, 13,
+    snprintf((char *)target_var, 13,
              "%02d:%02d:%02d:%03d",
              (uint8_t)buf[*buf_pos],
              (uint8_t)buf[*buf_pos + 1],
@@ -782,6 +783,7 @@ int read_header(CTRStruct *ptr, uint16_t len, FILE *fp)
 
     uint16_t buf_pos = 0;
     uint8_t buf[len - 4]; // first 4 bytes of buf (type+length) already read from file
+    memset(buf, 0, len - 4);
 
     if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
         return -1;
@@ -823,6 +825,7 @@ int read_event(CTRStruct *ptr, uint16_t len, FILE *fp)
 
     uint16_t buf_pos = 0;
     uint8_t buf[len - 4]; // first 4 bytes of buf (type+length) already read from file
+    memset(buf, 0, len - 4);
 
     if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
         return -1;
@@ -849,6 +852,7 @@ int read_footer(CTRStruct *ptr, uint16_t len, FILE *fp)
 
     uint16_t buf_pos = 0;
     uint8_t buf[len - 4]; // first 4 bytes of buf (type+length) already read from file
+    memset(buf, 0, len - 4);
 
     if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
         return -1;
@@ -914,6 +918,7 @@ void print_header(CTRStruct *ptr)
     printf("\nHeader (%d bytes):\n", ptr->header.length);
     printf("{\n");
     printf("timestamp: %s\n", ptr->header.date_time);
+    printf("file-name: %s\n", ptr->header.file_name);
     printf("file-format-version: %s\n", ptr->header.file_version);
     printf("pm-recording-version: %s\n", ptr->header.pm_version);
     printf("pm-recording-revision: %s\n", ptr->header.pm_revision);
@@ -1053,6 +1058,7 @@ CTRStruct *parse_events()
 
             if (record_type == HEADER)
             {
+                strcpy(node->header.file_name, fileList[n_files]->d_name);
                 head = tail = node;
             }
             else
@@ -1107,7 +1113,7 @@ int parse_args(int argc, char **argv)
             verbose_flag = true;
             printf("[ CFG ]: Verbose flag on\n");
         }
-        else if (strcmp(flag, "-d") == 0)
+        else if (strcmp(flag, "-i") == 0)
         {
             if (argc <= 0)
             {
@@ -1164,7 +1170,7 @@ void usage(const char *program)
 {
     fprintf(stderr, "Usage: %s [OPTIONS...] [FILES...]\n", program);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "    -d <path>     set input directory (mandatory argument)\n");
+    fprintf(stderr, "    -i <path>     set input directory (mandatory argument)\n");
     fprintf(stderr, "    -o <path>     set output directory (mandatory argument)\n");
     fprintf(stderr, "    -r <int>      set max number of records to be parsed (0 - unlimited; 10 - default)\n");
     fprintf(stderr, "    -p            print record content to stdout (default off)\n");
