@@ -1,12 +1,28 @@
+#define _DEFAULT_SOURCE
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdbool.h>
+#include <dirent.h>
+
 #include "uthash.h"
+
+void usage(const char *program);
 
 #define MAX_RECORDS 1000 * 1000
 
-const char *filepath = "sample_files/A20231207.1715+0000-1730+0000_SubNetwork=ONRM_ROOT_MO,SubNetwork=RAN,SubNetwork=NODE,SubNetwork=AV_AVEIRO,MeContext=NAV002B2,ManagedElement=NAV002B2_celltracefile_DUL1_1.bin";
+// Global variables
+const char *directory;
+const char *filepath;
+int n_files;
+struct dirent **fileList;
+
+int max_records = MAX_RECORDS;
+int dump_flag = false;
+int verbose_flag = false;
+const char *output_dir = {0};
 
 enum RecordType
 {
@@ -643,6 +659,36 @@ int RecordTypeValid(uint16_t type)
     return valid;
 }
 
+static char *shift_args(int *argc, char ***argv)
+{
+    assert(*argc > 0);
+    char *result = **argv;
+    *argc -= 1;
+    *argv += 1;
+    return result;
+}
+
+/* when return 1, scandir will put this dirent to the list */
+static int parse_ext_bin(const struct dirent *dir)
+{
+    if (!dir)
+        return 0;
+
+    if (dir->d_type == DT_REG) /* only deal with regular file */
+    {
+        const char *ext = strrchr(dir->d_name, '.');
+        if ((!ext) || (ext == dir->d_name))
+            return 0;
+        else
+        {
+            if (strcmp(ext, ".bin") == 0)
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* CHAR_BIT == 8 assumed */
 uint16_t le16_to_cpu(const uint8_t *buf)
 {
@@ -692,7 +738,7 @@ void scan_bytes_from_buf(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos, u
 
 void scan_date_time(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
-    snprintf(target_var, 20,
+    snprintf((char *)&target_var, 20,
              "%04d-%02d-%02d %02d:%02d:%02d",
              be16_to_cpu(buf + *buf_pos),
              (uint8_t)buf[*buf_pos + 2],
@@ -705,7 +751,7 @@ void scan_date_time(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 
 void scan_timestamp(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
-    snprintf(target_var, 13,
+    snprintf((char *)&target_var, 13,
              "%02d:%02d:%02d:%03d",
              (uint8_t)buf[*buf_pos],
              (uint8_t)buf[*buf_pos + 1],
@@ -720,15 +766,6 @@ int get_file_lenght(FILE *fp)
     fseek(fp, 0L, SEEK_END);
     lenght = ftell(fp);
     fseek(fp, 0L, SEEK_SET);
-
-    if (lenght > 0)
-    {
-        printf("DEBUG: Processing file with %d bytes\n", lenght);
-    }
-    else
-    {
-        printf("ERROR: File is empty");
-    }
 
     return lenght;
 }
@@ -756,7 +793,7 @@ int read_header(CTRStruct *ptr, uint16_t len, FILE *fp)
     scan_string_from_buf(ptr->header.ne_user_label, buf, &buf_pos, 128);
     scan_string_from_buf(ptr->header.ne_logical_label, buf, &buf_pos, 255);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 int read_scanner(CTRStruct *ptr, uint16_t len, FILE *fp)
@@ -766,6 +803,7 @@ int read_scanner(CTRStruct *ptr, uint16_t len, FILE *fp)
 
     uint16_t buf_pos = 0;
     uint8_t buf[len - 4]; // first 4 bytes of buf (type+length) already read from file
+    memset(buf, 0, len - 4);
 
     if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
         return -1;
@@ -775,7 +813,7 @@ int read_scanner(CTRStruct *ptr, uint16_t len, FILE *fp)
     scan_bytes_from_buf(ptr->scanner.status, buf, &buf_pos, 1);
     scan_bytes_from_buf(ptr->scanner.padding, buf, &buf_pos, 2);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 int read_event(CTRStruct *ptr, uint16_t len, FILE *fp)
@@ -801,7 +839,7 @@ int read_event(CTRStruct *ptr, uint16_t len, FILE *fp)
     scan_bytes_from_buf(event_parameters, buf, &buf_pos, len - buf_pos - 4);
     ptr->event.parameters = event_parameters;
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 int read_footer(CTRStruct *ptr, uint16_t len, FILE *fp)
@@ -818,7 +856,7 @@ int read_footer(CTRStruct *ptr, uint16_t len, FILE *fp)
     scan_date_time(ptr->footer.date_time, buf, &buf_pos);
     scan_bytes_from_buf(ptr->footer.padding, buf, &buf_pos, 1);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 void read_record_len_type(uint16_t *len, uint16_t *type, FILE *fp)
@@ -828,27 +866,28 @@ void read_record_len_type(uint16_t *len, uint16_t *type, FILE *fp)
     if (fread(buf, 1, sizeof buf, fp) != sizeof buf)
     {
         printf("ERROR: Reading from file\n");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     *len = be16_to_cpu(buf);
     if (len <= 0)
     {
         printf("ERROR: Record lenght '%hn' not valid\n", len);
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     *type = be16_to_cpu(buf + 2);
     if (RecordTypeValid(*type) != 1)
     {
         printf("ERROR: Record type '%hn' not known\n", type);
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 }
 
 CTRStruct *add_record(uint16_t type, uint16_t lenght, FILE *fp)
 {
     CTRStruct *new_node = malloc(sizeof(CTRStruct));
+    memset(new_node, 0, sizeof(CTRStruct));
 
     switch (type)
     {
@@ -924,7 +963,7 @@ void print_footer(CTRStruct *ptr)
     printf("}\n");
 }
 
-int print_record_info(CTRStruct *ptr, int num_records, uint16_t type, uint16_t lenght)
+void print_record_info(CTRStruct *ptr, int num_records, uint16_t type, uint16_t lenght)
 {
     switch (type)
     {
@@ -946,7 +985,7 @@ int print_record_info(CTRStruct *ptr, int num_records, uint16_t type, uint16_t l
 int dump_records(CTRStruct *node)
 {
     if (node == NULL)
-        return 0;
+        return EXIT_SUCCESS;
     do
     {
         switch (node->type)
@@ -966,60 +1005,188 @@ int dump_records(CTRStruct *node)
         }
     } while ((node = node->next) != NULL);
 
-    return 0;
+    return EXIT_SUCCESS;
+}
+
+CTRStruct *parse_events()
+{
+    CTRStruct *head = NULL;
+    CTRStruct *node = NULL;
+    CTRStruct *tail = NULL;
+
+    while (n_files--)
+    {
+        FILE *file;
+        char *fullpath = malloc(strlen(directory) + strlen(fileList[n_files]->d_name) + 2); // + 2 because of the '/' and the terminating 0
+        sprintf(fullpath, "%s/%s", directory, fileList[n_files]->d_name);
+        file = fopen(fullpath, "rb");
+        if (file == NULL)
+        {
+            printf("[ ERR ]: Opening the file %s\n", fullpath);
+            exit(EXIT_FAILURE);
+        }
+
+        int file_lenght = get_file_lenght(file);
+        if (file_lenght > 0)
+        {
+            if (verbose_flag)
+            {
+                printf("[ DBG ]: Input file -> %s\n", fullpath);
+            }
+            printf("[ DBG ]: Processing file with %d bytes\n", file_lenght);
+        }
+        else
+        {
+            printf("[ ERR ]: File is empty");
+        }
+
+        int num_records = 0;
+        while (file_lenght > 0 && num_records < max_records)
+        {
+            uint16_t record_lenght = 0;
+            uint16_t record_type = 255;
+            read_record_len_type(&record_lenght, &record_type, file);
+            num_records++;
+
+            node = add_record(record_type, record_lenght, file);
+            print_record_info(node, num_records, record_type, record_lenght);
+
+            if (record_type == HEADER)
+            {
+                head = tail = node;
+            }
+            else
+            {
+                tail->next = node;
+                tail = node;
+            }
+
+            file_lenght = file_lenght - record_lenght;
+        }
+        printf("DEBUG: Total %d records processed\n", num_records);
+
+        free(fullpath);
+        free(fileList[n_files]);
+        fclose(file);
+    }
+
+    free(fileList);
+
+    return head;
+}
+
+int parse_args(int argc, char **argv)
+{
+    const char *program = shift_args(&argc, &argv);
+    if (argc == 0)
+    {
+        usage(program);
+        exit(EXIT_FAILURE);
+    }
+
+    while (argc > 0)
+    {
+        const char *flag = shift_args(&argc, &argv);
+        if (strcmp(flag, "-r") == 0)
+        {
+            if (argc <= 0)
+            {
+                fprintf(stderr, "ERROR: no value is provided for %s\n", flag);
+                exit(EXIT_FAILURE);
+            }
+            max_records = atoi(shift_args(&argc, &argv));
+            printf("[ CFG ]: Max records set to %d\n", max_records);
+        }
+        else if (strcmp(flag, "-p") == 0)
+        {
+            dump_flag = true;
+            printf("[ CFG ]: Print flag on\n");
+        }
+        else if (strcmp(flag, "-v") == 0)
+        {
+            verbose_flag = true;
+            printf("[ CFG ]: Verbose flag on\n");
+        }
+        else if (strcmp(flag, "-d") == 0)
+        {
+            if (argc <= 0)
+            {
+                fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
+                exit(EXIT_FAILURE);
+            }
+            directory = shift_args(&argc, &argv);
+            printf("[ CFG ]: Set input directory to '%s'\n", directory);
+            n_files = scandir(directory, &fileList, parse_ext_bin, alphasort);
+            if (n_files == -1)
+            {
+                perror("[ DBG ]");
+                exit(EXIT_FAILURE);
+            }
+        }
+        else if (strcmp(flag, "-o") == 0)
+        {
+            if (argc <= 0)
+            {
+                fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
+                exit(EXIT_FAILURE);
+            }
+            output_dir = shift_args(&argc, &argv);
+        }
+        else if (strcmp(flag, "-h") == 0)
+        {
+            usage(program);
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            printf("[ WRN ]: Unkown flag %s\n", flag);
+        }
+    }
+
+    if (!fileList || !output_dir)
+    {
+        if (!fileList)
+        {
+            printf("\nError: argument -d is mandatory\n");
+        }
+        else
+        {
+            printf("\nError: argument -o is mandatory\n");
+        }
+        usage(program);
+        exit(EXIT_FAILURE);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+void usage(const char *program)
+{
+    fprintf(stderr, "Usage: %s [OPTIONS...] [FILES...]\n", program);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "    -d <path>     set input directory (mandatory argument)\n");
+    fprintf(stderr, "    -o <path>     set output directory (mandatory argument)\n");
+    fprintf(stderr, "    -r <int>      set max number of records to be parsed (0 - unlimited; 10 - default)\n");
+    fprintf(stderr, "    -p            print record content to stdout (default off)\n");
+    fprintf(stderr, "    -v            set verbose\n");
+    fprintf(stderr, "    -h            print usage and exit\n");
+    fprintf(stderr, "Example:\n");
+    fprintf(stderr, "    $ %s -r 0 -d sample_files -o output\n", program);
+    fprintf(stderr, "    Parse file1.bin.\n");
+    fprintf(stderr, "    Set max records to unlimited.\n");
+    fprintf(stderr, "    Print record contents to stdout.\n");
 }
 
 int main(int argc, char **argv)
 {
-    int max_records = MAX_RECORDS;
-    if (argc > 1)
-    {
-        sscanf(argv[1], "%d", &max_records);
-    }
-
-    add_events();
-
     CTRStruct *head = NULL;
-    CTRStruct *tail = NULL;
-    CTRStruct *node = NULL;
 
-    FILE *file;
-    file = fopen(filepath, "rb");
-    if (file == NULL)
-    {
-        printf("ERROR: Opening the file.\n");
-        exit(1);
-    }
-    int file_lenght = get_file_lenght(file);
+    parse_args(argc, argv);
+    add_events();
+    head = parse_events();
 
-    int num_records = 0;
-    while (file_lenght > 0 && num_records <= max_records)
-    // while (file_lenght > 0 && num_records <= 4)
-    {
-        uint16_t record_lenght = 0;
-        uint16_t record_type = 255;
-        read_record_len_type(&record_lenght, &record_type, file);
-        num_records++;
+    if (dump_flag == true)
+        dump_records(head);
 
-        node = add_record(record_type, record_lenght, file);
-        print_record_info(node, num_records, record_type, record_lenght);
-
-        if (record_type == HEADER)
-        {
-            head = tail = node;
-        }
-        else
-        {
-            tail->next = node;
-            tail = node;
-        }
-        file_lenght = file_lenght - record_lenght;
-    }
-    printf("DEBUG: Total %d records processed\n", num_records);
-
-    fclose(file);
-
-    // dump_records(head);
-
-    return 0;
+    return EXIT_SUCCESS;
 }
