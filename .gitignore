@@ -1,12 +1,9 @@
 # Parser executable
 parse-eri-ctr-4g
 
-# Parser directories
-sample_files
-config
-
-# Dump output
-*.txt
+# test directories
+input
+output
 
 # Prerequisites
 *.d

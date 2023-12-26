@@ -9,7 +9,7 @@
                 "-g",
                 "main.c",
                 "-o",
-                "${fileDirname}/parse-eri-ctr-4g"
+                "/home/rjdinis/development/c/parse-ericsson-ctr-4g/parse-eri-ctr-4g"
             ],
             "options": {
                 "cwd": "${fileDirname}"

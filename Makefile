@@ -1,10 +1,10 @@
 CC=gcc
 CFLAGS=-Wall
-TARGET=parse_eri_ctr
+TARGET=parse-eri-ctr-4g
 
 all:
-	@$(CC) $(CFLAGS) main.c -o $(TARGET)
-	@./$(TARGET)
+	@$(CC) $(CFLAGS) src/main.c -o $(TARGET)
+	@./$(TARGET) -v -r 10 -d ./input -o ./output
  
 clean:
 	rm $(TARGET)
