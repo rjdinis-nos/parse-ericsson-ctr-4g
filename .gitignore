@@ -2,8 +2,9 @@
 parse-eri-ctr-4g
 
 # test directories
-input
-output
+input/
+output/
+config/
 
 # Prerequisites
 *.d
