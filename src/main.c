@@ -18,15 +18,17 @@ void usage(const char *program);
 #define MAX_RECORDS 1000 * 1000
 
 // Global variables
-const char *directory;
-const char *filepath;
-int n_files;
-struct dirent **fileList;
-
 int max_records = MAX_RECORDS;
-int dump_flag = false;
+int list_records_flag = false;
+int dump_records_flag = false;
 int verbose_flag = false;
+
+const char *input_dir = {0};
 const char *output_dir = {0};
+
+const char PmEvents_filepath[] = "config/PmEvents.cfg";
+const char PmEventFormat_filepath[] = "config/PmEventFormat.cfg";
+const char PmEventParams_filepath[] = "config/PmEventParams.cfg";
 
 enum RecordType
 {
@@ -80,6 +82,8 @@ typedef struct CTRFooter
 
 typedef struct CTRStruct
 {
+    int file_id;
+    int record_id;
     struct CTRStruct *next; // Next structure in the linked list
     enum RecordType type;   // Indicates which of the union fields is valid
     union
@@ -91,29 +95,43 @@ typedef struct CTRStruct
     };
 } CTRStruct;
 
-typedef struct PMEvent
+typedef struct ParamsList
+{
+    int id;
+    char name[256];
+    bool unavailable_flag;
+    struct EventParams *next;
+} ParamsList;
+
+typedef struct EventConfig
 {
     int id; /* key */
     char name[128];
+    char type[128];
+    struct ParamsList params;
+    struct EventConfig *next;
     UT_hash_handle hh; /* makes this structure hashable */
-} PMEvent;
+} EventConfig;
 
-PMEvent *event_hash = NULL;
+EventConfig *event_hash = NULL;
 
-void add_pm_Event(int event_id, char *event_name)
+EventConfig *add_pm_Event(int event_id, const char *event_name, const char *event_type)
 {
-    struct PMEvent *s;
+    struct EventConfig *s;
 
     s = malloc(sizeof *s);
     memset(s, 0, sizeof *s);
     s->id = event_id;
     strcpy(s->name, event_name);
+    strcpy(s->type, event_type);
     HASH_ADD_INT(event_hash, id, s); /* id: name of key field */
+
+    return s;
 }
 
 const char *find_pm_event(int id)
 {
-    struct PMEvent *event = {0};
+    struct EventConfig *event = {0};
     char *event_name;
 
     HASH_FIND_INT(event_hash, &id, event); /* s: output pointer */
@@ -371,10 +389,13 @@ void read_record_len_type(uint16_t *len, uint16_t *type, FILE *fp)
     }
 }
 
-CTRStruct *add_record(uint16_t type, uint16_t lenght, FILE *fp)
+CTRStruct *add_record(int id, uint16_t type, uint16_t lenght, FILE *fp, int file_id)
 {
     CTRStruct *new_node = malloc(sizeof(CTRStruct));
     memset(new_node, 0, sizeof(CTRStruct));
+
+    new_node->file_id = file_id;
+    new_node->record_id = id;
 
     switch (type)
     {
@@ -401,6 +422,7 @@ void print_header(CTRStruct *ptr)
     printf("\nHeader (%d bytes):\n", ptr->header.length);
     printf("{\n");
     printf("timestamp: %s\n", ptr->header.date_time);
+    printf("file-id: %d\n", ptr->file_id);
     printf("file-name: %s\n", ptr->header.file_name);
     printf("file-format-version: %s\n", ptr->header.file_version);
     printf("pm-recording-version: %s\n", ptr->header.pm_version);
@@ -415,6 +437,7 @@ void print_scanner(CTRStruct *ptr)
     printf("\nScanner (%d bytes):\n", ptr->scanner.length);
     printf("{\n");
     printf("timestamp: %s\n", ptr->scanner.timestamp);
+    printf("file-id: %d\n", ptr->file_id);
     printf("Scannerid: 0x%02x%02x%02x\n", ptr->scanner.scannerid[0], ptr->scanner.scannerid[1], ptr->scanner.scannerid[2]);
     printf("Status: 0x%x\n", ptr->scanner.status[0]);
     printf("Padding Bytes: 0x%02x%02x%02x\n", ptr->scanner.padding[0], ptr->scanner.padding[1], ptr->scanner.padding[2]);
@@ -425,6 +448,7 @@ void print_event(CTRStruct *ptr)
 {
     printf("\nEvent (%d bytes):\n", ptr->event.length);
     printf("{\n");
+    printf("file-id: %d\n", ptr->file_id);
     if (ptr->event.name)
     {
         printf("Event: %s (%d)\n", ptr->event.name, ptr->event.id);
@@ -447,27 +471,9 @@ void print_footer(CTRStruct *ptr)
     printf("\nFooter (%d bytes):\n", ptr->footer.length);
     printf("{\n");
     printf("timestamp: %s\n", ptr->footer.date_time);
+    printf("file-id: %d\n", ptr->file_id);
     printf("Padding Bytes: 0x%02x\n", ptr->scanner.padding[0]);
     printf("}\n");
-}
-
-void print_record_info(CTRStruct *ptr, int num_records, uint16_t type, uint16_t lenght)
-{
-    switch (type)
-    {
-    case HEADER:
-        printf("#%03d %5d bytes HEADER\n", num_records, lenght);
-        break;
-    case SCANNER:
-        printf("#%03d %5d bytes SCANNER\n", num_records, lenght);
-        break;
-    case EVENT:
-        printf("#%03d %5d bytes EVENT -> %s (%d)\n", num_records, lenght, ptr->event.name, ptr->event.id);
-        break;
-    case FOOTER:
-        printf("#%03d %5d bytes FOOTER\n", num_records, lenght);
-        break;
-    }
 }
 
 int dump_records(CTRStruct *node)
@@ -496,17 +502,124 @@ int dump_records(CTRStruct *node)
     return EXIT_SUCCESS;
 }
 
+int list_records(CTRStruct *node)
+{
+    if (node == NULL)
+        return EXIT_SUCCESS;
+    printf("\nRecords:\n");
+    printf("------------------------------------------------------------------------\n");
+    printf("%3s %3s %6s %5s           %9s\n", "File_Id", "Id", "Bytes", "Type", "Event(Id)");
+
+    do
+    {
+        switch (node->type)
+        {
+        case HEADER:
+            printf("%6d  %3d  %5d  %-7s\n", node->file_id, node->record_id, node->header.length, "HEADER");
+            break;
+        case SCANNER:
+            printf("%6d  %3d  %5d  %-7s\n", node->file_id, node->record_id, node->header.length, "SCANNER");
+            break;
+        case EVENT:
+            printf("%6d  %3d  %5d  %-7s   %s (%d)\n", node->file_id, node->record_id, node->header.length, "EVENT", node->event.name, node->event.id);
+            break;
+        case FOOTER:
+            printf("%6d  %3d  %5d  %-7s\n", node->file_id, node->record_id, node->header.length, "FOOTER");
+            break;
+        }
+    } while ((node = node->next) != NULL);
+
+    return EXIT_SUCCESS;
+}
+
+int print_records_csv(CTRStruct *node, const char *path, char *mode)
+{
+    bool result = true;
+
+    FILE *f = fopen(path, mode);
+    if (f == NULL)
+    {
+        printf("[ ERR ]: Could not open file %s for writing: %s\n", path, strerror(errno));
+        return_defer(false);
+    }
+
+    if (node == NULL)
+        return_defer(false);
+
+    if (strcmp(mode, "w") == 0)
+        fprintf(f, "File_Id,Event_Name,Event_Size_bytes,Event_Id,Event_name\n");
+
+    do
+    {
+        switch (node->type)
+        {
+        case HEADER:
+            fprintf(f, "%d,%s,%d\n", node->file_id, "HEADER", node->header.length);
+            break;
+        case SCANNER:
+            fprintf(f, "%d,%s,%d\n", node->file_id, "SCANNER", node->scanner.length);
+            break;
+        case EVENT:
+            fprintf(f, "%d,%s,%d,%d,%s\n", node->file_id, "EVENT", node->event.length, node->event.id, node->event.name);
+            break;
+        case FOOTER:
+            fprintf(f, "%d,%s,%d\n", node->file_id, "FOOTER", node->footer.length);
+            break;
+        }
+    } while ((node = node->next) != NULL);
+
+defer:
+    if (f)
+        fclose(f);
+    return result;
+}
+
+int print_files_csv(CTRStruct *node, const char *path, char *mode)
+{
+    bool result = true;
+
+    FILE *f = fopen(path, mode);
+    if (f == NULL)
+    {
+        printf("[ ERR ]: Could not open file %s for writing: %s\n", path, strerror(errno));
+        return_defer(false);
+    }
+
+    if (node == NULL)
+        return_defer(false);
+
+    if (strcmp(mode, "w") == 0)
+        fprintf(f, "id, filename\n");
+
+    fprintf(f, "%d,%s\n", node->file_id, node->header.file_name);
+
+defer:
+    if (f)
+        fclose(f);
+    return result;
+}
+
 CTRStruct *parse_events()
 {
     CTRStruct *head = NULL;
     CTRStruct *node = NULL;
     CTRStruct *tail = NULL;
 
+    struct dirent **fileList;
+
+    int n_files = scandir(input_dir, &fileList, parse_ext_bin, alphasort);
+    if (n_files == -1)
+    {
+        perror("[ DBG ]");
+        exit(EXIT_FAILURE);
+    }
+
+    int files_processed = 0;
     while (n_files--)
     {
         FILE *file;
-        char *fullpath = malloc(strlen(directory) + strlen(fileList[n_files]->d_name) + 2); // + 2 because of the '/' and the terminating 0
-        sprintf(fullpath, "%s/%s", directory, fileList[n_files]->d_name);
+        char *fullpath = malloc(strlen(input_dir) + strlen(fileList[n_files]->d_name) + 2); // + 2 because of the '/' and the terminating 0
+        sprintf(fullpath, "%s/%s", input_dir, fileList[n_files]->d_name);
         file = fopen(fullpath, "rb");
         if (file == NULL)
         {
@@ -517,32 +630,32 @@ CTRStruct *parse_events()
         int file_lenght = get_file_lenght(file);
         if (file_lenght > 0)
         {
-            if (verbose_flag)
-            {
-                printf("[ DBG ]: Input file -> %s\n", fullpath);
-            }
-            printf("[ DBG ]: Processing file with %d bytes\n", file_lenght);
+            printf("\nParsing:\n");
+            printf("------------------------------------------------------------------------\n");
+            printf("[ INF ]: File:  %s\n", fullpath);
+            printf("[ INF ]: Size - %d bytes\n", file_lenght);
         }
         else
         {
             printf("[ ERR ]: File is empty");
         }
+        files_processed++;
 
         int num_records = 0;
         while (file_lenght > 0 && num_records < max_records)
         {
+
             uint16_t record_lenght = 0;
             uint16_t record_type = 255;
             read_record_len_type(&record_lenght, &record_type, file);
             num_records++;
 
-            node = add_record(record_type, record_lenght, file);
-            print_record_info(node, num_records, record_type, record_lenght);
+            node = add_record(num_records, record_type, record_lenght, file, files_processed);
 
             if (record_type == HEADER)
             {
-                strcpy(node->header.file_name, fileList[n_files]->d_name);
                 head = tail = node;
+                strcpy(node->header.file_name, fileList[n_files]->d_name);
             }
             else
             {
@@ -552,7 +665,25 @@ CTRStruct *parse_events()
 
             file_lenght = file_lenght - record_lenght;
         }
-        printf("DEBUG: Total %d records processed\n", num_records);
+        printf("[ INF ]: Records - %d processed\n", num_records);
+
+        if (list_records_flag == true)
+        {
+            list_records(head);
+        }
+
+        char *mode = (files_processed == 1) ? "w" : "a";
+
+        char *files_path = malloc(strlen(output_dir) + strlen("files.csv") + 2); // + 2 because of the '/' and the terminating 0
+        sprintf(files_path, "%s/%s", output_dir, "files.csv");
+        print_files_csv(head, files_path, mode);
+
+        char *reports_filepath = malloc(strlen(output_dir) + strlen("records.csv") + 2); // + 2 because of the '/' and the terminating 0
+        sprintf(reports_filepath, "%s/%s", output_dir, "records.csv");
+        print_records_csv(head, reports_filepath, mode);
+
+        if (dump_records_flag == true)
+            dump_records(head);
 
         free(fullpath);
         free(fileList[n_files]);
@@ -564,7 +695,7 @@ CTRStruct *parse_events()
     return head;
 }
 
-bool load_config_from_file(const char *path)
+EventConfig *load_event_format_config(const char *path, EventConfig *head)
 {
     bool result = true;
     String_Builder sb = {0};
@@ -579,24 +710,79 @@ bool load_config_from_file(const char *path)
         .count = sb.count,
     };
 
-    for (size_t row = 0; content.count > 0; ++row)
+    int row;
+    for (row = 0; content.count > 0; ++row)
     {
         String_View line = sv_trim(sv_chop_by_delim(&content, '\n'));
         if (line.count == 0)
             continue;
 
-        const char *key = temp_sv_to_cstr(sv_trim(sv_chop_by_delim(&line, '=')));
-        int value = temp_sv_to_int(sv_trim(line));
+        const char *name = temp_sv_to_cstr(sv_trim(sv_chop_by_delim(&line, ' ')));
+        int id = temp_sv_to_int(sv_trim(sv_chop_by_delim(&line, ' ')));
+        const char *param = temp_sv_to_cstr(sv_trim(sv_chop_by_delim(&line, ' ')));
+        const char *flag = temp_sv_to_cstr(sv_trim(line));
+
         if (verbose_flag)
         {
-            printf("[ CFG ]: Add event %s (%d) to hash table\n", key, value);
+            printf("[ CFG ]: Add parameter %s (%s)\n", param, flag);
         }
-        add_pm_Event(value, key);
     }
 
 defer:
     sb_free(sb);
-    return result;
+    return head;
+}
+
+EventConfig *load_event_config(const char *path)
+{
+    bool result = true;
+    String_Builder sb = {0};
+
+    EventConfig *head = NULL;
+    EventConfig *node = NULL;
+    EventConfig *tail = NULL;
+
+    printf("[ CFG ]: Loading configuration from %s\n", path);
+
+    if (!read_entire_file(path, &sb))
+        return_defer(false);
+
+    String_View content = {
+        .data = sb.items,
+        .count = sb.count,
+    };
+
+    int row;
+    for (row = 0; content.count > 0; ++row)
+    {
+        String_View line = sv_trim(sv_chop_by_delim(&content, '\n'));
+        if (line.count == 0)
+            continue;
+
+        const char *name = temp_sv_to_cstr(sv_trim(sv_chop_by_delim(&line, ' ')));
+        int id = temp_sv_to_int(sv_trim(sv_chop_by_delim(&line, ' ')));
+        const char *type = temp_sv_to_cstr(sv_trim(line));
+        if (verbose_flag)
+        {
+            printf("[ CFG ]: Add event %s (%d)\n", name, id);
+        }
+
+        node = add_pm_Event(id, name, type);
+        if (row == 0)
+        {
+            head = tail = node;
+        }
+        else
+        {
+            tail->next = node;
+            tail = node;
+        }
+    }
+    printf("[ CFG ]: Total %d event ids added to config table\n", row);
+
+defer:
+    sb_free(sb);
+    return head;
 }
 
 int parse_args(int argc, char **argv)
@@ -615,16 +801,24 @@ int parse_args(int argc, char **argv)
         {
             if (argc <= 0)
             {
-                fprintf(stderr, "ERROR: no value is provided for %s\n", flag);
+                fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
                 exit(EXIT_FAILURE);
             }
-            max_records = atoi(shift_args(&argc, &argv));
+            int max_record_arg = atoi(shift_args(&argc, &argv));
+            if (max_record_arg > 0)
+                max_records = max_record_arg;
+
             printf("[ CFG ]: Max records set to %d\n", max_records);
         }
-        else if (strcmp(flag, "-p") == 0)
+        else if (strcmp(flag, "-l") == 0)
         {
-            dump_flag = true;
-            printf("[ CFG ]: Print flag on\n");
+            list_records_flag = true;
+            printf("[ CFG ]: list records flag on\n");
+        }
+        else if (strcmp(flag, "-c") == 0)
+        {
+            dump_records_flag = true;
+            printf("[ CFG ]: Dump record contents flag on\n");
         }
         else if (strcmp(flag, "-v") == 0)
         {
@@ -638,14 +832,8 @@ int parse_args(int argc, char **argv)
                 fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
                 exit(EXIT_FAILURE);
             }
-            directory = shift_args(&argc, &argv);
-            printf("[ CFG ]: Set input directory to '%s'\n", directory);
-            n_files = scandir(directory, &fileList, parse_ext_bin, alphasort);
-            if (n_files == -1)
-            {
-                perror("[ DBG ]");
-                exit(EXIT_FAILURE);
-            }
+            input_dir = shift_args(&argc, &argv);
+            printf("[ CFG ]: Set input directory to '%s'\n", input_dir);
         }
         else if (strcmp(flag, "-o") == 0)
         {
@@ -655,6 +843,7 @@ int parse_args(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
             output_dir = shift_args(&argc, &argv);
+            printf("[ CFG ]: Set output directory to '%s'\n", output_dir);
         }
         else if (strcmp(flag, "-h") == 0)
         {
@@ -667,15 +856,15 @@ int parse_args(int argc, char **argv)
         }
     }
 
-    if (!fileList || !output_dir)
+    if (!input_dir || !output_dir)
     {
-        if (!fileList)
+        if (!input_dir)
         {
-            printf("\nError: argument -d is mandatory\n");
+            printf("\[ ERR ]: argument -d is mandatory\n");
         }
         else
         {
-            printf("\nError: argument -o is mandatory\n");
+            printf("\n[ ERR ]: argument -o is mandatory\n");
         }
         usage(program);
         exit(EXIT_FAILURE);
@@ -691,28 +880,35 @@ void usage(const char *program)
     fprintf(stderr, "    -i <path>     set input directory (mandatory argument)\n");
     fprintf(stderr, "    -o <path>     set output directory (mandatory argument)\n");
     fprintf(stderr, "    -r <int>      set max number of records to be parsed (0 - unlimited; 10 - default)\n");
-    fprintf(stderr, "    -p            print record content to stdout (default off)\n");
+    fprintf(stderr, "    -l            print record content to stdout (default off)\n");
+    fprintf(stderr, "    -c            print record content to stdout (default off)\n");
     fprintf(stderr, "    -v            set verbose\n");
     fprintf(stderr, "    -h            print usage and exit\n");
     fprintf(stderr, "Example:\n");
-    fprintf(stderr, "    $ %s -r 0 -d sample_files -o output\n", program);
-    fprintf(stderr, "    Parse file1.bin.\n");
+    fprintf(stderr, "    $ %s -r 0 -l -i ./input -o ./output\n", program);
+    fprintf(stderr, "    list records to stdout.\n");
     fprintf(stderr, "    Set max records to unlimited.\n");
-    fprintf(stderr, "    Print record contents to stdout.\n");
+    fprintf(stderr, "    Set input directory to ./input.\n");
+    fprintf(stderr, "    Set output directory to ./output.\n");
 }
 
 int main(int argc, char **argv)
 {
-    CTRStruct *head = NULL;
+    CTRStruct *ctr_head = NULL;
+    EventConfig *config_head = NULL;
 
-    if (!load_config_from_file("config/event_ids.ini"))
-        exit(EXIT_FAILURE);
+    printf("Config:\n");
+    printf("------------------------------------------------------------------------\n");
 
     parse_args(argc, argv);
-    head = parse_events();
 
-    if (dump_flag == true)
-        dump_records(head);
+    config_head = load_event_config(PmEvents_filepath);
+    if (!config_head)
+        exit(EXIT_FAILURE);
+
+    load_event_format_config(PmEventFormat_filepath, config_head);
+
+    ctr_head = parse_events();
 
     return EXIT_SUCCESS;
 }

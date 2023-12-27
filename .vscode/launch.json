@@ -10,10 +10,10 @@
             "request": "launch",
             "program": "${workspaceFolder}/parse-eri-ctr-4g",
             "args": [
-                "-v",
+                //"-v",
                 "-r",
                 "10",
-                //"-p",
+                //"-l",
                 "-i",
                 "./input",
                 "-o",

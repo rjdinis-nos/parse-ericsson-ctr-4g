@@ -179,6 +179,7 @@ bool nob_sv_eq(String_View a, String_View b)
 bool read_entire_file(const char *path, String_Builder *sb)
 {
     bool result = true;
+
     size_t buf_size = 32 * 1024;
     char *buf = realloc(NULL, buf_size);
     assert(buf != NULL && "Buy more RAM lool!!\n");
