@@ -1,6 +1,11 @@
 {
     "cmake.configureOnOpen": true,
     "files.associations": {
-        "type_traits": "c"
-    }
+        "type_traits": "c",
+        "errno.h": "c",
+        "stddef.h": "c",
+        "stdbool.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

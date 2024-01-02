@@ -7,9 +7,9 @@
             "args": [
                 "-fdiagnostics-color=always",
                 "-g",
-                "main.c",
+                "${workspaceFolder}/src/main.c",
                 "-o",
-                "/home/rjdinis/development/c/parse-ericsson-ctr-4g/parse-eri-ctr-4g"
+                "${workspaceFolder}/parse-eri-ctr-4g"
             ],
             "options": {
                 "cwd": "${fileDirname}"

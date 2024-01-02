@@ -6,6 +6,9 @@ input/
 output/
 config/
 
+# Backup files
+*.bkp
+
 # Prerequisites
 *.d
 
