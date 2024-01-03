@@ -8,11 +8,8 @@
             "program": "${workspaceFolder}/parse-eri-ctr-4g",
             "args": [
                 "-r",
-                "10",
-                "-i",
-                "./input",
-                "-o",
-                "./output"
+                "5",
+                "-d",
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
