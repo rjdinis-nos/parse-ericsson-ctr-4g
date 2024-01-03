@@ -12,9 +12,6 @@
 #define NOB_IMPLEMENTATION
 #include "nob.h"
 
-#define UTILS_IMPLEMENTATION
-#include "utils.h"
-
 #include "uthash.h"
 
 void usage(const char *program);
@@ -31,9 +28,75 @@ const char *input_dir = {0};
 const char *output_dir = {0};
 
 const char PmEventParams_filepath[] = "config/PmEventParams.cfg";
-const char files_filename_format[] = "%s/ctr_files_parsed.csv";          // <output_folder>/ctr_files_parsed.csv
-const char records_filename_format[] = "%s/ctr_records_%s_%s_%s.csv\n";  // <output_folder>/..._<sitename>_<day>_<rop>
-const char events_filename_format[] = "%s/ctr_events_%s_%s_%s_%s.csv\n"; // <output_folder>/...<event name>_<sitename>_<day>_<rop>
+const char files_filename_format[255] = "%s/ctr_files_parsed.csv";          // <output_folder>/ctr_files_parsed.csv
+const char records_filename_format[255] = "%s/ctr_records_%s_%s_%s.csv\n";  // <output_folder>/..._<sitename>_<day>_<rop>
+const char events_filename_format[255] = "%s/ctr_events_%s_%s_%s_%s.csv\n"; // <output_folder>/...<event name>_<sitename>_<day>_<rop>
+
+/* CHAR_BIT == 8 assumed */
+uint16_t le16_to_cpu(const uint8_t *buf)
+{
+    return ((uint16_t)buf[0]) | (((uint16_t)buf[1]) << 8);
+}
+
+uint16_t be16_to_cpu(const uint8_t *buf)
+{
+    return ((uint16_t)buf[1]) | (((uint16_t)buf[0]) << 8);
+}
+
+uint32_t be32_to_cpu(const uint8_t *buf)
+{
+    return ((uint32_t)buf[2] | (uint32_t)buf[1] << 8 | (uint32_t)buf[0] << 16);
+}
+
+void cpu_to_le16(uint8_t *buf, uint16_t val)
+{
+    buf[0] = (val & 0x00FF);
+    buf[1] = (val & 0xFF00) >> 8;
+}
+
+void cpu_to_be16(uint8_t *buf, uint16_t val)
+{
+    buf[0] = (val & 0xFF00) >> 8;
+    buf[1] = (val & 0x00FF);
+}
+
+char *calculateSize(off_t size)
+{
+    char *result = (char *)malloc(sizeof(char) * 20);
+    static int GB = 1024 * 1024 * 1024;
+    static int MB = 1024 * 1024;
+    static int KB = 1024;
+    if (size >= GB)
+    {
+        if (size % GB == 0)
+            sprintf(result, "%jd GiB", size / GB);
+        else
+            sprintf(result, "%.1f GiB", (float)size / GB);
+    }
+    else if (size >= MB)
+    {
+        if (size % MB == 0)
+            sprintf(result, "%jd MiB", size / MB);
+        else
+            sprintf(result, "%.1f MiB", (float)size / MB);
+    }
+    else
+    {
+        if (size == 0)
+        {
+            result[0] = '0';
+            result[1] = '\0';
+        }
+        else
+        {
+            if (size % KB == 0)
+                sprintf(result, "%jd KiB", size / KB);
+            else
+                sprintf(result, "%.1f KiB", (float)size / KB);
+        }
+    }
+    return result;
+}
 
 enum RecordType
 {
@@ -52,9 +115,9 @@ typedef struct RecordLenType
 typedef struct CTRHeader
 {
     uint16_t length;
-    char date[9];             //  5 bytes + termination char (yyyy-mm-dd)
-    char rop[5];              //  5 bytes + termination char (yyyy-mm-dd)
-    char parse_timestamp[20]; //  18 bytes + termination char (yyyy-mm-dd hh:mm:ss)
+    uint8_t date[9];             //  5 bytes + termination char (yyyy-mm-dd)
+    uint8_t rop[5];              //  5 bytes + termination char (yyyy-mm-dd)
+    uint8_t parse_timestamp[20]; //  18 bytes + termination char (yyyy-mm-dd hh:mm:ss)
     uint32_t num_records;
     uint8_t file_name[256];
     uint8_t file_version[6];       //  5 bytes + termination char
@@ -211,12 +274,12 @@ void scan_bytes_from_buf(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos, u
     *buf_pos = *buf_pos + size;
 }
 
-void scan_current_timestamp(char *target_var)
+void scan_current_timestamp(uint8_t *target_var)
 {
     char buff[100];
     time_t now = time(0);
     strftime(buff, 100, "%Y-%m-%d %H:%M:%S", localtime(&now));
-    strcpy(target_var, buff);
+    strcpy((char *)target_var, (char *)buff);
 }
 
 void scan_date(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
@@ -225,8 +288,7 @@ void scan_date(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
              "%04d%02d%02d",
              be16_to_cpu(buf + *buf_pos),
              (uint8_t)buf[*buf_pos + 2],
-             (uint8_t)buf[*buf_pos + 3],
-             (uint8_t)buf[*buf_pos + 4]);
+             (uint8_t)buf[*buf_pos + 3]);
     // does not move buf_pos
 }
 
@@ -234,8 +296,8 @@ void scan_rop(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
     snprintf((char *)target_var, 5,
              "%02d%02d",
-             (uint8_t)buf[*buf_pos + 5],
-             (uint8_t)buf[*buf_pos + 6]);
+             (uint8_t)buf[*buf_pos + 4],
+             (uint8_t)buf[*buf_pos + 5]);
     // does not move buf_pos
 }
 
@@ -378,16 +440,16 @@ void read_record_len_type(uint16_t *len, uint16_t *type, FILE *fp)
     }
 
     *len = be16_to_cpu(buf);
-    if (len <= 0)
+    if (*len <= 0)
     {
-        printf("ERROR: Record lenght '%hn' not valid\n", len);
+        printf("ERROR: Record lenght '%lu' not valid\n", (unsigned long)len);
         exit(EXIT_FAILURE);
     }
 
     *type = be16_to_cpu(buf + 2);
     if (RecordTypeValid(*type) != 1)
     {
-        printf("ERROR: Record type '%hn' not known\n", type);
+        printf("ERROR: Record type '%lu' not known\n", (unsigned long)type);
         exit(EXIT_FAILURE);
     }
 }
@@ -681,11 +743,11 @@ CTRStruct *parse_events()
 
         char *mode = (files_processed == 1) ? "w" : "a";
 
-        char files_parsed_filename[125] = {0};
+        char files_parsed_filename[500] = {0};
         sprintf(files_parsed_filename, files_filename_format, output_dir);
         print_files_csv(head, files_parsed_filename, mode);
 
-        char reports_filepath[125] = {0};
+        char reports_filepath[500] = {0};
         sprintf(reports_filepath, records_filename_format, output_dir, head->header.ne_logical_label, head->header.date, head->header.rop);
         print_records_csv(head, reports_filepath, mode);
 
@@ -704,13 +766,14 @@ CTRStruct *parse_events()
 
 EventConfig *load_event_format_config(const char *path, EventConfig *head)
 {
-    bool result = true;
     Nob_String_Builder sb = {0};
 
     printf("[ CFG ]: Loading configuration from %s\n", path);
 
+    // bool result = true;
     if (!nob_read_entire_file(path, &sb))
-        nob_return_defer(false);
+        goto defer; // TODO: check why nob_return_defer throw warning
+    // nob_return_defer(false);
 
     Nob_String_View content = {
         .data = sb.items,
@@ -724,8 +787,8 @@ EventConfig *load_event_format_config(const char *path, EventConfig *head)
         if (line.count == 0)
             continue;
 
-        const char *name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        int id = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        // const char *name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        //  int id = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
         const char *param = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
         const char *flag = nob_temp_sv_to_cstr(nob_sv_trim(line));
 
@@ -742,7 +805,7 @@ defer:
 
 EventConfig *load_event_config(const char *path)
 {
-    bool result = true;
+    // bool result = true;
     Nob_String_Builder sb = {0};
 
     EventConfig *head = NULL;
@@ -752,7 +815,8 @@ EventConfig *load_event_config(const char *path)
     printf("[ CFG ]: Loading configuration from %s\n", path);
 
     if (!nob_read_entire_file(path, &sb))
-        nob_return_defer(false);
+        goto defer;
+    // nob_return_defer(false);
 
     Nob_String_View content = {
         .data = sb.items,
@@ -790,6 +854,15 @@ EventConfig *load_event_config(const char *path)
 defer:
     nob_sb_free(sb);
     return head;
+}
+
+static char *shift_args(int *argc, char ***argv)
+{
+    assert(*argc > 0);
+    char *result = **argv;
+    *argc -= 1;
+    *argv += 1;
+    return result;
 }
 
 int parse_args(int argc, char **argv)
@@ -839,8 +912,11 @@ int parse_args(int argc, char **argv)
                 fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
                 exit(EXIT_FAILURE);
             }
-            input_dir = shift_args(&argc, &argv);
-            printf("[ CFG ]: Set input directory to '%s'\n", input_dir);
+            else
+            {
+                output_dir = shift_args(&argc, &argv);
+                printf("[ CFG ]: Set output directory to '%s'\n", output_dir);
+            }
         }
         else if (strcmp(flag, "-o") == 0)
         {
@@ -849,8 +925,11 @@ int parse_args(int argc, char **argv)
                 fprintf(stderr, "[ ERR ]: no value is provided for %s\n", flag);
                 exit(EXIT_FAILURE);
             }
-            output_dir = shift_args(&argc, &argv);
-            printf("[ CFG ]: Set output directory to '%s'\n", output_dir);
+            else
+            {
+                output_dir = shift_args(&argc, &argv);
+                printf("[ CFG ]: Set output directory to '%s'\n", output_dir);
+            }
         }
         else if (strcmp(flag, "-h") == 0)
         {
@@ -863,18 +942,15 @@ int parse_args(int argc, char **argv)
         }
     }
 
-    if (!input_dir || !output_dir)
+    if (!input_dir)
     {
-        if (!input_dir)
-        {
-            printf("\[ ERR ]: argument -i is mandatory\n");
-        }
-        else
-        {
-            printf("\n[ ERR ]: argument -o is mandatory\n");
-        }
-        usage(program);
-        exit(EXIT_FAILURE);
+        input_dir = "./input";
+        printf("[ CFG ]: Set input directory to default '%s'\n", input_dir);
+    }
+    if (!output_dir)
+    {
+        output_dir = "./output";
+        printf("[ CFG ]: Set output directory to default '%s'\n", output_dir);
     }
 
     return EXIT_SUCCESS;
@@ -901,8 +977,8 @@ void usage(const char *program)
 
 int main(int argc, char **argv)
 {
-    CTRStruct *ctr_head = NULL;
     EventConfig *config_head = NULL;
+    CTRStruct *ctr_head = NULL;
 
     printf("Config:\n");
     printf("------------------------------------------------------------------------\n");
@@ -916,6 +992,8 @@ int main(int argc, char **argv)
     // load_event_format_config(PmEventParams_filepath, config_head);
 
     ctr_head = parse_events();
+    if (!ctr_head)
+        exit(EXIT_FAILURE);
 
     return EXIT_SUCCESS;
 }
