@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 #include <dirent.h>
 #include <errno.h>
 
@@ -30,6 +31,9 @@ const char *input_dir = {0};
 const char *output_dir = {0};
 
 const char PmEventParams_filepath[] = "config/PmEventParams.cfg";
+const char files_filename_format[] = "%s/ctr_files_parsed.csv";          // <output_folder>/ctr_files_parsed.csv
+const char records_filename_format[] = "%s/ctr_records_%s_%s_%s.csv\n";  // <output_folder>/..._<sitename>_<day>_<rop>
+const char events_filename_format[] = "%s/ctr_events_%s_%s_%s_%s.csv\n"; // <output_folder>/...<event name>_<sitename>_<day>_<rop>
 
 enum RecordType
 {
@@ -48,6 +52,10 @@ typedef struct RecordLenType
 typedef struct CTRHeader
 {
     uint16_t length;
+    char date[9];             //  5 bytes + termination char (yyyy-mm-dd)
+    char rop[5];              //  5 bytes + termination char (yyyy-mm-dd)
+    char parse_timestamp[20]; //  18 bytes + termination char (yyyy-mm-dd hh:mm:ss)
+    uint32_t num_records;
     uint8_t file_name[256];
     uint8_t file_version[6];       //  5 bytes + termination char
     uint8_t pm_version[14];        // 13 bytes + termination char
@@ -203,6 +211,34 @@ void scan_bytes_from_buf(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos, u
     *buf_pos = *buf_pos + size;
 }
 
+void scan_current_timestamp(char *target_var)
+{
+    char buff[100];
+    time_t now = time(0);
+    strftime(buff, 100, "%Y-%m-%d %H:%M:%S", localtime(&now));
+    strcpy(target_var, buff);
+}
+
+void scan_date(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
+{
+    snprintf((char *)target_var, 9,
+             "%04d%02d%02d",
+             be16_to_cpu(buf + *buf_pos),
+             (uint8_t)buf[*buf_pos + 2],
+             (uint8_t)buf[*buf_pos + 3],
+             (uint8_t)buf[*buf_pos + 4]);
+    // does not move buf_pos
+}
+
+void scan_rop(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
+{
+    snprintf((char *)target_var, 5,
+             "%02d%02d",
+             (uint8_t)buf[*buf_pos + 5],
+             (uint8_t)buf[*buf_pos + 6]);
+    // does not move buf_pos
+}
+
 void scan_date_time(uint8_t *target_var, uint8_t *buf, uint16_t *buf_pos)
 {
     snprintf((char *)target_var, 20,
@@ -246,6 +282,7 @@ int read_header(CTRStruct *ptr, uint16_t len, FILE *fp)
 {
     ptr->type = HEADER;
     ptr->header.length = len;
+    scan_current_timestamp(ptr->header.parse_timestamp);
 
     uint16_t buf_pos = 0;
     uint8_t buf[len - 4]; // first 4 bytes of buf (type+length) already read from file
@@ -257,6 +294,8 @@ int read_header(CTRStruct *ptr, uint16_t len, FILE *fp)
     scan_string_from_buf(ptr->header.file_version, buf, &buf_pos, 5);
     scan_string_from_buf(ptr->header.pm_version, buf, &buf_pos, 13);
     scan_string_from_buf(ptr->header.pm_revision, buf, &buf_pos, 5);
+    scan_date(ptr->header.date, buf, &buf_pos); // read date but not move buf_pos
+    scan_rop(ptr->header.rop, buf, &buf_pos);   // read rop but not move buf_pos
     scan_date_time(ptr->header.date_time, buf, &buf_pos);
     scan_string_from_buf(ptr->header.ne_user_label, buf, &buf_pos, 128);
     scan_string_from_buf(ptr->header.ne_logical_label, buf, &buf_pos, 255);
@@ -553,9 +592,9 @@ int print_files_csv(CTRStruct *node, const char *path, char *mode)
         nob_return_defer(false);
 
     if (strcmp(mode, "w") == 0)
-        fprintf(f, "id, filename\n");
+        fprintf(f, "id, records, parse_datetime, filename\n");
 
-    fprintf(f, "%d,%s\n", node->file_id, node->header.file_name);
+    fprintf(f, "%d,%u,%s,%s\n", node->file_id, (unsigned int)node->header.num_records, node->header.parse_timestamp, node->header.file_name);
 
 defer:
     if (f)
@@ -633,6 +672,7 @@ CTRStruct *parse_events()
             file_lenght = file_lenght - record_lenght;
         }
         printf("[ INF ]: File #%03d:  Records - %d processed\n", files_processed, num_records);
+        head->header.num_records = num_records;
 
         if (list_records_flag == true)
         {
@@ -641,12 +681,12 @@ CTRStruct *parse_events()
 
         char *mode = (files_processed == 1) ? "w" : "a";
 
-        char *files_path = malloc(strlen(output_dir) + strlen("files.csv") + 2); // + 2 because of the '/' and the terminating 0
-        sprintf(files_path, "%s/%s", output_dir, "files.csv");
-        print_files_csv(head, files_path, mode);
+        char files_parsed_filename[125] = {0};
+        sprintf(files_parsed_filename, files_filename_format, output_dir);
+        print_files_csv(head, files_parsed_filename, mode);
 
-        char *reports_filepath = malloc(strlen(output_dir) + strlen("records.csv") + 2); // + 2 because of the '/' and the terminating 0
-        sprintf(reports_filepath, "%s/%s", output_dir, "records.csv");
+        char reports_filepath[125] = {0};
+        sprintf(reports_filepath, records_filename_format, output_dir, head->header.ne_logical_label, head->header.date, head->header.rop);
         print_records_csv(head, reports_filepath, mode);
 
         if (dump_records_flag == true)
