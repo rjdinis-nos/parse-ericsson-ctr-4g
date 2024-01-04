@@ -14,6 +14,13 @@
 
 #include "uthash.h"
 
+#define nob_return_defer(value) \
+    do                          \
+    {                           \
+        result = (value);       \
+        goto defer;             \
+    } while (0)
+
 void usage(const char *program);
 
 #define MAX_RECORDS 1000 * 1000
@@ -169,10 +176,12 @@ typedef struct CTRStruct
 
 typedef struct ParamsList
 {
-    int id;
-    char name[256];
+    char name[256]; /* key (string is WITHIN the structure) */
     bool unavailable_flag;
-    struct EventParams *next;
+    char type[256];
+    int size;
+    struct ParamsList *next;
+    UT_hash_handle hh; /* makes this structure hashable */
 } ParamsList;
 
 typedef struct EventConfig
@@ -180,28 +189,94 @@ typedef struct EventConfig
     int id; /* key */
     char name[128];
     char type[128];
-    struct ParamsList params;
+    struct ParamsList *params_head;
     struct EventConfig *next;
     UT_hash_handle hh; /* makes this structure hashable */
 } EventConfig;
 
 EventConfig *event_hash = NULL;
 
-EventConfig *add_pm_Event(int event_id, const char *event_name, const char *event_type)
+int free_pm_event_params(EventConfig *event)
 {
-    struct EventConfig *s;
+    ParamsList *next = NULL;
+    ParamsList *param = event->params_head;
+    while (param->next != NULL)
+    {
+        next = param->next;
+        free(param);
+        param = next;
+    }
+    event->params_head = NULL;
+    return EXIT_SUCCESS;
+}
+
+ParamsList *find_pm_event_param_by_name(EventConfig *event, const char *param_name)
+{
+    ParamsList *param = event->params_head;
+    while (param->name != param_name && param->next != NULL)
+    {
+        param = param->next;
+    }
+
+    if (strcmp(param->name, param_name) != 0)
+    {
+        return NULL;
+    }
+    else
+    {
+        return param;
+    }
+    return NULL;
+}
+
+ParamsList *find_pm_event_param_tail(EventConfig *event)
+{
+    ParamsList *param = event->params_head;
+    while (param->next != NULL)
+    {
+        param = param->next;
+    }
+
+    return param;
+}
+
+ParamsList *add_pm_event_param(const char *param_name, bool param_unavailable_flag, const char *param_type, int param_size)
+{
+    struct ParamsList *s;
 
     s = malloc(sizeof *s);
     memset(s, 0, sizeof *s);
-    s->id = event_id;
-    strcpy(s->name, event_name);
-    strcpy(s->type, event_type);
-    HASH_ADD_INT(event_hash, id, s); /* id: name of key field */
+    strcpy(s->name, param_name);
+    s->unavailable_flag = param_unavailable_flag;
+    strcpy(s->type, param_type);
+    s->size = param_size;
 
     return s;
 }
 
-const char *find_pm_event(int id)
+int free_pm_events(EventConfig *event)
+{
+    free_pm_event_params(event);
+
+    EventConfig *next = NULL;
+    while (event->next != NULL)
+    {
+        next = event->next;
+        free(event);
+        event = next;
+    }
+    return EXIT_SUCCESS;
+}
+
+struct EventConfig *find_pm_event(int id)
+{
+    struct EventConfig *s;
+
+    HASH_FIND_INT(event_hash, &id, s); /* s: output pointer */
+    return s;
+}
+
+const char *get_pm_event_name_by_id(int id)
 {
     struct EventConfig *event = {0};
     char *event_name;
@@ -216,6 +291,21 @@ const char *find_pm_event(int id)
         event_name = "";
     }
     return event_name;
+}
+
+EventConfig *add_pm_Event(int event_id, const char *event_name, const char *event_type)
+{
+    struct EventConfig *s;
+
+    s = malloc(sizeof *s);
+    memset(s, 0, sizeof *s);
+    s->id = event_id;
+    strcpy(s->name, event_name);
+    strcpy(s->type, event_type);
+    s->params_head = NULL;
+    HASH_ADD_INT(event_hash, id, s); /* id: name of key field */
+
+    return s;
 }
 
 int RecordTypeValid(uint16_t type)
@@ -400,7 +490,7 @@ int read_event(CTRStruct *ptr, uint16_t len, FILE *fp)
     ptr->event.id = be32_to_cpu(buf);
     buf_pos = buf_pos + 3;
 
-    const char *event_name = find_pm_event(ptr->event.id);
+    const char *event_name = get_pm_event_name_by_id(ptr->event.id);
     strcpy(ptr->event.name, event_name);
 
     int event_parameter_size = len - buf_pos - 4;
@@ -452,6 +542,39 @@ void read_record_len_type(uint16_t *len, uint16_t *type, FILE *fp)
         printf("ERROR: Record type '%lu' not known\n", (unsigned long)type);
         exit(EXIT_FAILURE);
     }
+}
+
+int free_events(CTRStruct *event)
+{
+    CTRStruct *next = NULL;
+    while (event->next != NULL)
+    {
+        /* switch (event->type)
+        {
+        case HEADER:
+            printf("[ INF ]: Free file Header Recordn");
+            free(event->header);
+            break;
+        case SCANNER:
+            printf("[ INF ]: Free file Header Recordn");
+            free(&event->header);
+            break;
+        case EVENT:
+            printf("[ INF ]: Free file Header Recordn");
+            free(&event->header);
+            break;
+        case FOOTER:
+            printf("[ INF ]: Free file Header Recordn");
+            free(&event->header);
+            break;
+        } */
+
+        next = event->next;
+        printf("[ INF ]: Free event file id %d\n", event->file_id);
+        free(event);
+        event = next;
+    }
+    return EXIT_SUCCESS;
 }
 
 CTRStruct *add_record(int id, uint16_t type, uint16_t lenght, FILE *fp, int file_id)
@@ -709,6 +832,9 @@ CTRStruct *parse_events()
             printf("[ ERR ]: File is empty");
         }
 
+        head = NULL;
+        node = NULL;
+        tail = NULL;
         int num_records = 0;
         while (file_lenght > 0 && num_records < max_records)
         {
@@ -757,49 +883,12 @@ CTRStruct *parse_events()
         free(fullpath);
         free(fileList[n_files]);
         fclose(file);
+
+        // free_events(head);
     }
 
     free(fileList);
 
-    return head;
-}
-
-EventConfig *load_event_format_config(const char *path, EventConfig *head)
-{
-    Nob_String_Builder sb = {0};
-
-    printf("[ CFG ]: Loading configuration from %s\n", path);
-
-    // bool result = true;
-    if (!nob_read_entire_file(path, &sb))
-        goto defer; // TODO: check why nob_return_defer throw warning
-    // nob_return_defer(false);
-
-    Nob_String_View content = {
-        .data = sb.items,
-        .count = sb.count,
-    };
-
-    int row;
-    for (row = 0; content.count > 0; ++row)
-    {
-        Nob_String_View line = nob_sv_trim(nob_sv_chop_by_delim(&content, '\n'));
-        if (line.count == 0)
-            continue;
-
-        // const char *name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        //  int id = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        const char *param = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        const char *flag = nob_temp_sv_to_cstr(nob_sv_trim(line));
-
-        if (verbose_flag)
-        {
-            printf("[ CFG ]: Add parameter %s (%s)\n", param, flag);
-        }
-    }
-
-defer:
-    nob_sb_free(sb);
     return head;
 }
 
@@ -811,6 +900,8 @@ EventConfig *load_event_config(const char *path)
     EventConfig *head = NULL;
     EventConfig *node = NULL;
     EventConfig *tail = NULL;
+    ParamsList *event_param = NULL;
+    ParamsList *event_param_tail = NULL;
 
     printf("[ CFG ]: Loading configuration from %s\n", path);
 
@@ -830,28 +921,66 @@ EventConfig *load_event_config(const char *path)
         if (line.count == 0)
             continue;
 
-        const char *name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        int id = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
-        const char *type = nob_temp_sv_to_cstr(nob_sv_trim(line));
-        if (verbose_flag)
+        if (line.data[0] == '#') // bypass commented lines
+            continue;
+
+        // read event fields
+        const char *event_name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        int event_id = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        const char *event_type = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+
+        node = find_pm_event(event_id);
+        if (node == NULL)
         {
-            printf("[ CFG ]: Add event %s (%d)\n", name, id);
+            node = add_pm_Event(event_id, event_name, event_type);
+            if (verbose_flag)
+            {
+                printf("[ CFG ]: Add event %s (%d)\n", event_name, event_id);
+            }
         }
 
-        node = add_pm_Event(id, name, type);
-        if (row == 0)
+        // read event param fields and add it to the list
+        const char *param_name = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        bool param_unavailable_flag = (nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')))[0] == 'N') ? false : false;
+        const char *param_type = nob_temp_sv_to_cstr(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+        int param_size = nob_temp_sv_to_int(nob_sv_trim(nob_sv_chop_by_delim(&line, ' ')));
+
+        event_param = add_pm_event_param(param_name, param_unavailable_flag, param_type, param_size);
+        if (verbose_flag)
         {
+            printf("[ CFG ]: Add parameter %s (type=%s; size=%d; unavailable_flag=%s)\n", param_name, param_type, param_size, param_unavailable_flag ? "true" : "false");
+        }
+
+        if (node->params_head == NULL)
+        {
+            node->params_head = event_param;
+        }
+        else
+        {
+            event_param_tail = find_pm_event_param_tail(node);
+            event_param_tail->next = event_param;
+        }
+
+        // move event node list pointers
+        if (row > 0)
+        {
+            tail = node;
             head = tail = node;
         }
         else
         {
             tail->next = node;
-            tail = node;
+            head = tail = node;
         }
     }
-    printf("[ CFG ]: Total %d event ids added to config table\n", row);
+    printf("[ CFG ]: Total %d event params added to config table\n", row);
+
+    // event_param = find_pm_event_param_by_name(tail, "EVENT_PARAM_L3MESSAGE_CONTENTS");
+    // printf("param name = %s\n", event_param->name);
+    // free_pm_events(head);
 
 defer:
+    printf("defer\n");
     nob_sb_free(sb);
     return head;
 }
